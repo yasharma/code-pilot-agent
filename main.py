@@ -11,7 +11,11 @@ load_dotenv()
 MAX_RETRIES = 3
 FILE_PATH = "calc.py"
 TEST_PATH = "test_calc.py"
-INSTRUCTION = "Change the `add` function to subtract instead of add."
+INSTRUCTION = """
+    I want to create a new function which can return me output as a number, 
+    example: user ask what is 5% of 100, it should return 5. another example: user ask what is 10% of 200, 
+    it should return 20. please create a function which can do this. 
+    please make sure to not change any other code in the file. just create the simple function in the file"""
 
 
 def read_file(path):
