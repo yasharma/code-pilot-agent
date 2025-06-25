@@ -119,14 +119,43 @@ Filename: {filename}
 
 Generate well-structured, production-ready code for this new file.
 Include appropriate imports, docstrings, and error handling.
+
+IMPORTANT: Make sure all functions and classes exported by this module are properly defined and accessible.
+The tests for this module will be placed in a 'tests' directory and will import from this module.
+Make sure your code can be imported correctly from a different directory.
+
 {PYTHON_CODE_ONLY}
 """
     return await ask_agent(prompt)
 
 
-async def generate_test_file(source_code, filename):
-    """Generate a test file for a given source file."""
+async def generate_test_file(source_code, filename, test_directory=None):
+    """Generate a test file for a given source file.
+    
+    Args:
+        source_code (str): The source code to generate tests for
+        filename (str): The name of the source file
+        test_directory (str, optional): Directory where test will be placed. 
+                                       None means same directory as source file
+    """
     test_filename = f"test_{filename}"
+    module_name = filename.replace(".py", "")
+    
+    # Determine import strategy based on test location
+    if test_directory:
+        import_strategy = f"""IMPORTANT: This test file will be in the '{test_directory}' directory.
+Since the source file is in the parent directory, use:
+```python
+import sys
+sys.path.append("..")  # Add parent directory to path
+from {module_name} import *  # Or specific functions
+```"""
+    else:
+        import_strategy = f"""IMPORTANT: This test file will be in the same directory as the source file.
+Use direct imports like:
+```python
+from {module_name} import *  # Or specific functions
+```"""
     
     prompt = f"""Create a test file for the following Python code:
 
@@ -137,6 +166,9 @@ Source code ({filename}):
 
 Generate comprehensive pytest test cases that cover all functionality in the source file.
 The test filename will be: {test_filename}
+
+{import_strategy}
+
 Include appropriate imports and test functions.
 {PYTHON_CODE_ONLY}
 """

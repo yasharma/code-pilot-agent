@@ -144,7 +144,7 @@ async def create_new_file(filename, instruction):
     
     # Generate tests for the new file
     test_filename = get_test_path(filename)
-    test_code = await generate_test_file(source_code, filename)
+    test_code = await generate_test_file(source_code, filename, test_directory="tests")
     
     # Write both files
     write_file(filename, source_code)
