@@ -1,4 +1,7 @@
 from agents import Agent, Runner
+import subprocess
+import asyncio
+import os
 
 # Template strings for common prompt components
 PYTHON_CODE_ONLY = """
@@ -27,6 +30,278 @@ file_agent = Agent(
     name="File Planner",
     instructions="You analyze instructions and determine what files need to be created or modified. Provide concise and specific responses."
 )
+
+
+def run_tests_with_output(test_path):
+    """Run tests and return output and return code."""
+    try:
+        # Use the virtual environment's python and pytest
+        venv_python = ".venv/bin/python"
+        if os.path.exists(venv_python):
+            result = subprocess.run([venv_python, "-m", "pytest", test_path, "-v"], capture_output=True, text=True)
+        else:
+            # Fallback to system pytest
+            result = subprocess.run(["pytest", test_path, "-v"], capture_output=True, text=True)
+        return result.stdout + result.stderr, result.returncode
+    except Exception as e:
+        return f"Error running tests: {str(e)}", 1
+
+
+def extract_error_details(test_output):
+    """Extract meaningful error details from test output."""
+    lines = test_output.split('\n')
+    errors = []
+    in_error_section = False
+    
+    for line in lines:
+        if 'FAILED' in line or 'ERROR' in line:
+            in_error_section = True
+            errors.append(line)
+        elif in_error_section and (line.startswith('E ') or line.startswith('> ')):
+            errors.append(line)
+        elif in_error_section and line.strip() == '':
+            in_error_section = False
+    
+    return '\n'.join(errors) if errors else test_output
+
+
+async def generate_code_with_retry(instruction, filename=None, existing_code="", max_retries=3, test_path=None):
+    """
+    Generate code with automatic retry on test failures.
+    
+    Args:
+        instruction (str): The instruction for code generation
+        filename (str, optional): Name of the file being generated/modified
+        existing_code (str): Existing code to modify (empty for new files)
+        max_retries (int): Maximum number of retry attempts
+        test_path (str, optional): Path to test file for validation
+    
+    Returns:
+        dict: Contains 'code', 'success', 'attempts', 'final_error'
+    """
+    current_code = existing_code
+    final_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        print(f"🔄 Code generation attempt {attempt}/{max_retries}")
+        
+        try:
+            if attempt == 1:
+                # First attempt - generate fresh code
+                if existing_code:
+                    current_code = await modify_code(existing_code, instruction)
+                else:
+                    current_code = await generate_new_file(instruction, filename or "generated_file.py")
+            else:
+                # Retry with error feedback
+                error_feedback = f"""
+Previous attempt failed with the following errors:
+{final_error}
+
+Please fix these specific issues while maintaining the core functionality.
+Focus on:
+1. Syntax errors
+2. Import issues  
+3. Logic errors
+4. Test compatibility
+"""
+                current_code = await modify_code(current_code, instruction + error_feedback)
+            
+            # If we have a test path, validate the code
+            if test_path:
+                # Write the code to a temporary location for testing
+                temp_file = filename or "temp_generated.py"
+                with open(temp_file, "w") as f:
+                    f.write(current_code)
+                
+                # Run tests
+                test_output, return_code = run_tests_with_output(test_path)
+                
+                if return_code == 0:
+                    print(f"✅ Code generation successful on attempt {attempt}")
+                    return {
+                        'code': current_code,
+                        'success': True,
+                        'attempts': attempt,
+                        'final_error': None
+                    }
+                else:
+                    final_error = extract_error_details(test_output)
+                    print(f"❌ Attempt {attempt} failed with errors:")
+                    print(final_error)
+                    
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)  # Brief pause before retry
+            else:
+                # No test validation - assume success
+                return {
+                    'code': current_code,
+                    'success': True,
+                    'attempts': attempt,
+                    'final_error': None
+                }
+                
+        except Exception as e:
+            final_error = f"Code generation error: {str(e)}"
+            print(f"❌ Attempt {attempt} failed with exception: {final_error}")
+            
+            if attempt < max_retries:
+                await asyncio.sleep(1)
+    
+    return {
+        'code': current_code,
+        'success': False,
+        'attempts': max_retries,
+        'final_error': final_error
+    }
+
+
+async def generate_tests_with_retry(source_code, instruction, filename, max_retries=3, existing_test_code=""):
+    """
+    Generate test code with automatic retry on syntax/import errors.
+    
+    Args:
+        source_code (str): The source code to generate tests for
+        instruction (str): Original instruction
+        filename (str): Source filename
+        max_retries (int): Maximum retry attempts
+        existing_test_code (str): Existing test code to enhance
+    
+    Returns:
+        dict: Contains 'code', 'success', 'attempts', 'final_error'
+    """
+    current_test_code = existing_test_code
+    final_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        print(f"🔄 Test generation attempt {attempt}/{max_retries}")
+        
+        try:
+            if attempt == 1:
+                # First attempt
+                if existing_test_code:
+                    current_test_code = await generate_tests(source_code, existing_test_code, instruction)
+                else:
+                    current_test_code = await generate_test_file(source_code, filename, test_directory="tests")
+            else:
+                # Retry with error feedback
+                error_feedback = f"""
+Previous test generation failed with:
+{final_error}
+
+Please fix the test code to address these issues:
+1. Import errors
+2. Syntax errors
+3. Test logic issues
+4. Compatibility with the source code
+"""
+                current_test_code = await generate_tests(source_code, current_test_code, instruction + error_feedback)
+            
+            # Basic syntax validation
+            try:
+                compile(current_test_code, '<string>', 'exec')
+                print(f"✅ Test generation successful on attempt {attempt}")
+                return {
+                    'code': current_test_code,
+                    'success': True,
+                    'attempts': attempt,
+                    'final_error': None
+                }
+            except SyntaxError as e:
+                final_error = f"Syntax error in generated tests: {str(e)}"
+                print(f"❌ Test attempt {attempt} failed: {final_error}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    
+        except Exception as e:
+            final_error = f"Test generation error: {str(e)}"
+            print(f"❌ Test attempt {attempt} failed with exception: {final_error}")
+            
+            if attempt < max_retries:
+                await asyncio.sleep(1)
+    
+    return {
+        'code': current_test_code,
+        'success': False,
+        'attempts': max_retries,
+        'final_error': final_error
+    }
+
+
+async def create_or_modify_with_retry(instruction, filename=None, existing_code="", max_retries=3):
+    """
+    High-level function that handles the complete code generation and testing flow with retries.
+    
+    Args:
+        instruction (str): The instruction for what to implement
+        filename (str, optional): Target filename
+        existing_code (str): Existing code to modify (empty for new files)
+        max_retries (int): Maximum retry attempts
+    
+    Returns:
+        dict: Contains 'source_code', 'test_code', 'success', 'details'
+    """
+    print(f"🚀 Starting code generation with retry for: {instruction[:50]}...")
+    
+    # Step 1: Generate/modify source code
+    source_result = await generate_code_with_retry(
+        instruction=instruction,
+        filename=filename,
+        existing_code=existing_code,
+        max_retries=max_retries
+    )
+    
+    if not source_result['success']:
+        return {
+            'source_code': source_result['code'],
+            'test_code': None,
+            'success': False,
+            'details': f"Source code generation failed after {source_result['attempts']} attempts: {source_result['final_error']}"
+        }
+    
+    # Step 2: Generate test code
+    test_result = await generate_tests_with_retry(
+        source_code=source_result['code'],
+        instruction=instruction,
+        filename=filename or "generated_file.py",
+        max_retries=max_retries
+    )
+    
+    if not test_result['success']:
+        print(f"⚠️ Test generation failed, but source code is available")
+        return {
+            'source_code': source_result['code'],
+            'test_code': test_result['code'],
+            'success': False,
+            'details': f"Source code generated successfully, but test generation failed: {test_result['final_error']}"
+        }
+    
+    return {
+        'source_code': source_result['code'],
+        'test_code': test_result['code'],
+        'success': True,
+        'details': f"Successfully generated both source and tests in {source_result['attempts']} source attempts and {test_result['attempts']} test attempts"
+    }
+
+
+def validate_python_code(code):
+    """
+    Basic validation of Python code syntax.
+    
+    Args:
+        code (str): Python code to validate
+        
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    try:
+        compile(code, '<string>', 'exec')
+        return True, None
+    except SyntaxError as e:
+        return False, f"Syntax error: {str(e)}"
+    except Exception as e:
+        return False, f"Compilation error: {str(e)}"
 
 
 def strip_markdown(response):
